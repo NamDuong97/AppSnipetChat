@@ -1,0 +1,101 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# TextExpander specific
+# Database files (để local, không đẩy lên)
+snippets.db
+snippets_backup.db
+
+# Config files (có thể chứa thông tin cá nhân)
+config.json
+settings.json
+
+# Log files
+*.log
+logs/
+
+# Build outputs
+dist/
+build/
+TextExpander.exe  # File build cuối cùng
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Icon files (nếu muốn giữ local)
+# resources/icon.png  # Bỏ comment nếu muốn giữ icon local
+# resources/icon.ico
+
+# Virtual environment
+venv*/
+env*/

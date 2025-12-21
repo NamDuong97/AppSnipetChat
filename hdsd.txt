@@ -1,0 +1,25 @@
+=== TEXT EXPANDER - HƯỚNG DẪN SỬ DỤNG ===
+
+1. CÀI ĐẶT:
+   - Tải file TextExpander.exe
+   - Chạy file .exe (không cần cài đặt gì thêm)
+
+2. SỬ DỤNG:
+   - Icon sẽ xuất hiện ở system tray (góc phải dưới màn hình)
+   - Click phải vào icon để mở menu
+   
+3. THÊM TIN NHẮN NHANH:
+   - Mở "Quản lý" từ menu
+   - Nhập Keyword (vd: cc)
+   - Nhập Nội dung (vd: tôi tên Nam, 20 tuổi)
+   - Nhấn Lưu
+
+4. SỬ DỤNG:
+   - Mở Facebook/Word/Zalo...
+   - Gõ "cc" + SPACE
+   - Tự động thay thế thành "tôi tên Nam, 20 tuổi"
+
+5. LƯU Ý:
+   - Ứng dụng chạy nền, không cần mở cửa sổ
+   - Dữ liệu lưu trong file snippets.db cùng thư mục
+   - Backup file này để không mất dữ liệu
