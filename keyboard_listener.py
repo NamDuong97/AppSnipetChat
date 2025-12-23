@@ -81,33 +81,30 @@ class TextExpander:
                 self.toggle_enabled()
     
     def process_buffer(self, buffer_text: str):
-        """Xử lý buffer và thay thế nếu tìm thấy snippet"""
-        # Loại bỏ khoảng trắng thừa
         keyword = buffer_text.strip()
-        
         if not keyword:
             return
-        
-        # Tìm trong database
+
         content = self.db.get_snippet(keyword)
-        
         if content:
-            print(f"Expanding: '{keyword}' -> '{content[:30]}...'")
-            self.replace_text(keyword, content)
-    
-    def replace_text(self, keyword: str, content: str):
-        """Xóa keyword và gõ content mới"""
-        # Tính số lần backspace cần gõ
-        backspace_count = len(keyword)
+            self.replace_text(keyword, content, include_trigger=True)
         
-        # Gõ backspace để xóa keyword
+    def type_unicode(self, text: str):
+        for ch in text:
+            self.controller.press(ch)
+            self.controller.release(ch)
+            time.sleep(0.002)
+
+    def replace_text(self, keyword: str, content: str, include_trigger=False):
+        # +1 để xóa luôn space / enter
+        backspace_count = len(keyword) + (1 if include_trigger else 0)
+
         for _ in range(backspace_count):
             self.controller.press(Key.backspace)
             self.controller.release(Key.backspace)
-            time.sleep(0.001)  # Delay nhỏ để ổn định
-        
-        # Gõ nội dung mới
-        self.controller.type(content)
+            time.sleep(0.001)
+
+        self.type_unicode(content)
     
     def toggle_enabled(self):
         """Bật/tắt ứng dụng"""
