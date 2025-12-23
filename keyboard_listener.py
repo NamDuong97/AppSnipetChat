@@ -1,6 +1,7 @@
 import time
 import threading
 import logging
+import re
 from pynput import keyboard
 from pynput.keyboard import Controller, Key, KeyCode
 from database import Database
@@ -16,171 +17,249 @@ class TextExpander:
         )
         self.logger = logging.getLogger(__name__)
         
-        # Cũng in ra console
+        # Console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+        console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
         
         self.db = Database(db_path)
+        
+        # Buffer - chỉ lưu word hiện tại
         self.buffer = ""
         self.is_enabled = True
+        
+        # Trigger keys
         self.trigger_keys = {Key.space, Key.tab, Key.enter}
         
-        self.max_buffer_length = 50
+        # Controller
         self.controller = Controller()
+        
+        # Flags
         self.is_expanding = False
         self.modifiers = set()
         self.buffer_lock = threading.Lock()
         
-        # THÊM: Theo dõi lần nhấn phím cuối để xử lý tiếng Việt
-        self.last_key_time = time.time()
-        self.key_debounce_time = 0.1  # 100ms
+        # Thời gian debounce cho Unikey
+        self.last_char_time = 0
+        self.char_debounce = 0.05  # 50ms - giảm xuống để responsive hơn
         
-        self.logger.info("Text Expander initialized")
+        # Timeout cho buffer - tự động xóa nếu không gõ trong X giây
+        self.buffer_timeout = 5.0  # 5 giây
+        self.last_activity_time = time.time()
+        
+        self.logger.info("=" * 60)
+        self.logger.info("Text Expander initialized - IMPROVED VERSION")
+        self.logger.info("=" * 60)
     
-    def clear_buffer(self):
-        """Xóa buffer và log"""
+    def is_valid_char(self, char):
+        """Kiểm tra ký tự có hợp lệ cho keyword không"""
+        if not char:
+            return False
+        # Chấp nhận: chữ cái, số, dấu gạch dưới, dấu chấm
+        return char.isalnum() or char in ['_', '.', '-']
+    
+    def clear_buffer(self, reason=""):
+        """Xóa buffer"""
         with self.buffer_lock:
             if self.buffer:
-                self.logger.debug(f"🔄 Clearing buffer: '{self.buffer}'")
+                self.logger.debug(f"🔄 Clear buffer [{reason}]: '{self.buffer}' -> ''")
                 self.buffer = ""
+            self.last_activity_time = time.time()
     
     def add_to_buffer(self, char: str):
-        """Thêm ký tự vào buffer với xử lý tiếng Việt"""
+        """Thêm ký tự vào buffer"""
         current_time = time.time()
         
-        # Xử lý debounce cho tiếng Việt
-        if current_time - self.last_key_time < self.key_debounce_time:
-            self.logger.debug(f"⚠️ Debounce: Ignoring fast key '{char}'")
+        # Debounce để xử lý Unikey
+        time_since_last = current_time - self.last_char_time
+        if time_since_last < self.char_debounce:
+            self.logger.debug(f"⚠️ Debounce skip: '{char}' ({time_since_last:.3f}s)")
             return
         
-        self.last_key_time = current_time
+        self.last_char_time = current_time
         
         with self.buffer_lock:
-            # KHÔNG bỏ qua space nữa - để xử lý riêng
-            if len(self.buffer) >= self.max_buffer_length:
-                removed = self.buffer[0]
-                self.buffer = self.buffer[1:]
-                self.logger.debug(f"Buffer full, removed '{removed}'")
+            # Kiểm tra timeout - xóa buffer nếu quá lâu không gõ
+            if current_time - self.last_activity_time > self.buffer_timeout:
+                if self.buffer:
+                    self.logger.debug(f"⏱️ Buffer timeout, clearing: '{self.buffer}'")
+                    self.buffer = ""
             
-            self.buffer += char
-            self.logger.debug(f"➕ Added '{char}' → Buffer: '{self.buffer}'")
+            # Chỉ thêm ký tự hợp lệ
+            if self.is_valid_char(char):
+                self.buffer += char
+                self.logger.debug(f"➕ '{char}' -> buffer: '{self.buffer}'")
+            else:
+                self.logger.debug(f"❌ Invalid char ignored: '{char}' (ord: {ord(char)})")
+            
+            self.last_activity_time = current_time
     
     def remove_from_buffer(self, count=1):
         """Xóa ký tự khỏi buffer"""
         with self.buffer_lock:
             if self.buffer:
-                for _ in range(count):
-                    if self.buffer:
-                        removed = self.buffer[-1]
-                        self.buffer = self.buffer[:-1]
-                        self.logger.debug(f"➖ Removed '{removed}' → Buffer: '{self.buffer}'")
+                old_buffer = self.buffer
+                self.buffer = self.buffer[:-count] if len(self.buffer) > count else ""
+                self.logger.debug(f"➖ Backspace: '{old_buffer}' -> '{self.buffer}'")
+                self.last_activity_time = time.time()
     
     def get_current_buffer(self):
-        """Lấy buffer hiện tại"""
+        """Lấy buffer hiện tại (thread-safe)"""
         with self.buffer_lock:
             return self.buffer
     
     def on_press(self, key):
         """Xử lý khi phím được nhấn"""
+        # Bỏ qua nếu đang expanding
         if self.is_expanding:
-            self.logger.debug("⏸️ Ignored (is_expanding)")
             return
         
+        # Bỏ qua nếu disabled
         if not self.is_enabled:
-            self.logger.debug("⏸️ Ignored (disabled)")
-            return
-        
-        # Xử lý modifier keys
-        if key in [Key.ctrl, Key.ctrl_l, Key.ctrl_r, 
-                   Key.alt, Key.alt_l, Key.alt_r,
-                   Key.shift, Key.shift_l, Key.shift_r]:
-            self.modifiers.add(key)
-            self.logger.debug(f"🔧 Modifier: {key}")
             return
         
         try:
-            # Phím ký tự
-            if hasattr(key, 'char') and key.char:
-                # KHÔNG kiểm tra modifier nữa để hỗ trợ Shift+char
-                self.add_to_buffer(key.char)
-                    
-        except AttributeError:
-            # Phím đặc biệt
-            if key == Key.backspace:
-                current_buffer = self.get_current_buffer()
-                self.logger.debug(f"⌫ Backspace on buffer: '{current_buffer}'")
-                self.remove_from_buffer()
+            # ===== XỬ LÝ MODIFIER KEYS =====
+            if key in [Key.ctrl, Key.ctrl_l, Key.ctrl_r, 
+                       Key.alt, Key.alt_l, Key.alt_r,
+                       Key.shift, Key.shift_l, Key.shift_r,
+                       Key.cmd, Key.cmd_l, Key.cmd_r]:
+                self.modifiers.add(key)
+                return
             
-            # Kiểm tra trigger key (space, tab, enter)
-            elif key in self.trigger_keys:
+            # Nếu có modifier (ngoại trừ Shift đơn), xóa buffer
+            non_shift_modifiers = self.modifiers - {Key.shift, Key.shift_l, Key.shift_r}
+            if non_shift_modifiers:
+                self.clear_buffer("modifier key combo")
+                return
+            
+            # ===== XỬ LÝ KÝ TỰ THƯỜNG =====
+            if hasattr(key, 'char') and key.char:
+                # Chỉ thêm ký tự hợp lệ vào buffer
+                if self.is_valid_char(key.char):
+                    self.add_to_buffer(key.char)
+                else:
+                    # Ký tự đặc biệt -> xóa buffer
+                    self.clear_buffer(f"special char: '{key.char}'")
+                return
+        
+        except AttributeError:
+            # ===== XỬ LÝ PHÍM ĐỆC BIỆT =====
+            
+            # Backspace
+            if key == Key.backspace:
+                self.remove_from_buffer()
+                return
+            
+            # Trigger keys (space, tab, enter)
+            if key in self.trigger_keys:
                 current_buffer = self.get_current_buffer()
-                self.logger.info(f"🎯 TRIGGER: {key} | Buffer: '{current_buffer}'")
+                
+                self.logger.info("=" * 60)
+                self.logger.info(f"🎯 TRIGGER: {key}")
+                self.logger.info(f"📝 Buffer: '{current_buffer}'")
                 
                 if current_buffer:
-                    # QUAN TRỌNG: Xóa space khỏi buffer nếu có
-                    if current_buffer.endswith(' '):
-                        current_buffer = current_buffer.rstrip()
-                        self.logger.debug(f"Trimmed space from buffer")
-                    
-                    self.process_buffer(current_buffer)
+                    # Xử lý buffer
+                    self.process_buffer(current_buffer, key)
                 else:
-                    self.logger.debug("Empty buffer on trigger")
+                    self.logger.info("❌ Buffer empty, nothing to process")
                 
-                # LUÔN xóa buffer sau trigger
-                self.clear_buffer()
+                # XÓA BUFFER NGAY SAU TRIGGER
+                self.clear_buffer("after trigger")
+                self.logger.info("=" * 60)
+                return
             
-            # Hotkey bật/tắt ứng dụng (Ctrl+Alt+X)
-            elif key == KeyCode.from_char('x'):
-                if Key.ctrl in self.modifiers and Key.alt in self.modifiers:
-                    self.logger.info("🔘 HOTKEY: Ctrl+Alt+X")
+            # Hotkey toggle (Ctrl+Alt+X)
+            if key == KeyCode.from_char('x') or key == KeyCode.from_char('X'):
+                if (Key.ctrl in self.modifiers or Key.ctrl_l in self.modifiers or Key.ctrl_r in self.modifiers) and \
+                   (Key.alt in self.modifiers or Key.alt_l in self.modifiers or Key.alt_r in self.modifiers):
                     self.toggle_enabled()
-            else:
-                # Các phím đặc biệt khác - XÓA BUFFER
-                self.logger.debug(f"🗑️ Special key, clearing buffer: {key}")
-                self.clear_buffer()
+                    return
+            
+            # Các phím di chuyển con trỏ - KHÔNG xóa buffer
+            cursor_keys = {Key.left, Key.right, Key.up, Key.down, Key.home, Key.end, Key.page_up, Key.page_down}
+            if key in cursor_keys:
+                self.logger.debug(f"🔽 Cursor key: {key}, keeping buffer")
+                return
+            
+            # Các phím khác - xóa buffer
+            self.clear_buffer(f"special key: {key}")
     
     def on_release(self, key):
         """Xử lý khi phím được thả"""
-        # Xóa modifier key
+        # Xóa modifier
         if key in [Key.ctrl, Key.ctrl_l, Key.ctrl_r, 
                    Key.alt, Key.alt_l, Key.alt_r,
-                   Key.shift, Key.shift_l, Key.shift_r]:
-            if key in self.modifiers:
-                self.modifiers.remove(key)
-                self.logger.debug(f"🔧 Modifier released: {key}")
+                   Key.shift, Key.shift_l, Key.shift_r,
+                   Key.cmd, Key.cmd_l, Key.cmd_r]:
+            self.modifiers.discard(key)
     
-    def process_buffer(self, buffer_text: str):
+    def process_buffer(self, keyword: str, trigger_key):
         """Xử lý buffer để tìm và thay thế snippet"""
-        # Loại bỏ khoảng trắng thừa
-        keyword = buffer_text.strip()
-        
-        # QUAN TRỌNG: Xử lý tiếng Việt - loại bỏ dấu
-        keyword_clean = self.remove_vietnamese_accents(keyword)
-        self.logger.info(f"🔍 Processing: '{keyword}' → Clean: '{keyword_clean}'")
-        
-        if not keyword_clean:
-            self.logger.debug("Empty keyword after cleaning")
+        if not keyword:
             return
         
-        # Tìm trong database với keyword đã làm sạch
-        content = self.db.get_snippet(keyword_clean)
-        if not content:
-            # Thử tìm với keyword gốc
-            content = self.db.get_snippet(keyword)
+        # Làm sạch keyword
+        keyword = keyword.strip()
         
+        self.logger.info(f"🔍 Searching for keyword: '{keyword}'")
+        
+        # Tìm kiếm theo thứ tự ưu tiên:
+        # 1. Exact match (chính xác)
+        # 2. Lowercase match (không phân biệt hoa thường)
+        # 3. Without Vietnamese accents (bỏ dấu tiếng Việt)
+        
+        content = None
+        match_type = None
+        
+        # 1. Exact match
+        content = self.db.get_snippet(keyword)
         if content:
-            self.logger.info(f"✅ FOUND: '{keyword_clean}' → '{content[:50]}...'")
-            self.replace_text(keyword, content)
+            match_type = "exact"
+            self.logger.info(f"✅ Found [EXACT]: '{keyword}'")
+        
+        # 2. Lowercase match
+        if not content:
+            content = self.db.get_snippet(keyword.lower())
+            if content:
+                match_type = "lowercase"
+                self.logger.info(f"✅ Found [LOWERCASE]: '{keyword.lower()}'")
+        
+        # 3. Without accents
+        if not content:
+            keyword_no_accents = self.remove_vietnamese_accents(keyword)
+            if keyword_no_accents != keyword:
+                content = self.db.get_snippet(keyword_no_accents)
+                if content:
+                    match_type = "no_accents"
+                    self.logger.info(f"✅ Found [NO_ACCENTS]: '{keyword_no_accents}'")
+        
+        # 4. Search in database with LIKE
+        if not content:
+            search_results = self.db.search_snippets(keyword)
+            if search_results:
+                # Lấy kết quả đầu tiên
+                first_result = search_results[0]
+                found_keyword = first_result['keyword']
+                content = first_result['content']
+                match_type = "search"
+                self.logger.info(f"✅ Found [SEARCH]: '{found_keyword}' matches '{keyword}'")
+        
+        # Thay thế nếu tìm thấy
+        if content:
+            self.logger.info(f"📤 Content preview: '{content[:100]}{'...' if len(content) > 100 else ''}'")
+            self.replace_text(keyword, content, trigger_key)
         else:
-            self.logger.info(f"❌ NOT FOUND: '{keyword_clean}'")
+            self.logger.info(f"❌ NOT FOUND: '{keyword}'")
     
     def remove_vietnamese_accents(self, text: str) -> str:
-        """Loại bỏ dấu tiếng Việt để tìm keyword"""
+        """Loại bỏ dấu tiếng Việt"""
         if not text:
             return text
         
-        # Bảng chuyển đổi dấu tiếng Việt
         vietnamese_map = {
             'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
             'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
@@ -210,65 +289,101 @@ class TextExpander:
             'Ỳ': 'Y', 'Ý': 'Y', 'Ỷ': 'Y', 'Ỹ': 'Y', 'Ỵ': 'Y',
         }
         
-        result = []
-        for char in text:
-            if char in vietnamese_map:
-                result.append(vietnamese_map[char])
-            else:
-                result.append(char)
-        
-        return ''.join(result)
+        result = ''.join(vietnamese_map.get(char, char) for char in text)
+        return result
     
-    def type_unicode(self, text: str):
-        """Gõ text an toàn với Unicode"""
-        self.logger.debug(f"⌨️ Typing: '{text[:50]}...'")
-        for ch in text:
-            self.controller.press(ch)
-            self.controller.release(ch)
-            time.sleep(0.002)
-    
-    def replace_text(self, keyword: str, content: str):
+    def replace_text(self, keyword: str, content: str, trigger_key):
         """Xóa keyword và gõ content mới"""
         if self.is_expanding:
-            self.logger.warning("Already expanding, skipping")
+            self.logger.warning("⚠️ Already expanding, skip")
             return
-            
+        
         self.is_expanding = True
         
         try:
-            # Chỉ xóa số ký tự bằng độ dài keyword (KHÔNG +1 cho space)
-            # Vì space đã được trigger xử lý
+            # Số ký tự cần xóa = độ dài keyword
             backspace_count = len(keyword)
-            self.logger.info(f"🔄 Replacing: '{keyword}' ({backspace_count} chars)")
             
-            # Xóa keyword
+            self.logger.info(f"🔄 Replacing '{keyword}' ({backspace_count} chars) with '{content[:50]}...'")
+            
+            # Đợi một chút để đảm bảo trigger key đã được xử lý
+            time.sleep(0.05)
+            
+            # Xóa keyword bằng backspace
             for i in range(backspace_count):
                 self.controller.press(Key.backspace)
                 self.controller.release(Key.backspace)
-                time.sleep(0.001)
+                time.sleep(0.01)  # Tăng delay giữa các backspace
+            
+            # Đợi một chút trước khi gõ
+            time.sleep(0.05)
             
             # Gõ content mới
-            self.type_unicode(content)
+            self.type_text(content)
             
-            self.logger.info(f"✅ DONE: '{keyword}' → '{content[:50]}...'")
+            # Nếu trigger key là space, thêm space sau content
+            if trigger_key == Key.space:
+                time.sleep(0.02)
+                self.controller.press(Key.space)
+                self.controller.release(Key.space)
+            
+            self.logger.info(f"✅ REPLACEMENT DONE")
             
         except Exception as e:
-            self.logger.error(f"❌ ERROR: {e}")
+            self.logger.error(f"❌ ERROR in replace_text: {e}", exc_info=True)
         finally:
+            # Đợi một chút trước khi bật lại
+            time.sleep(0.1)
             self.is_expanding = False
-            # QUAN TRỌNG: Xóa buffer sau khi thay thế xong
-            self.clear_buffer()
+    
+    def type_text(self, text: str):
+        """Gõ text với xử lý Unicode"""
+        self.logger.debug(f"⌨️ Typing {len(text)} characters...")
+        
+        for char in text:
+            try:
+                # Xử lý ký tự đặc biệt
+                if char == '\n':
+                    self.controller.press(Key.enter)
+                    self.controller.release(Key.enter)
+                elif char == '\t':
+                    self.controller.press(Key.tab)
+                    self.controller.release(Key.tab)
+                else:
+                    # Gõ ký tự thường
+                    self.controller.press(char)
+                    self.controller.release(char)
+                
+                # Delay nhỏ giữa các ký tự
+                time.sleep(0.005)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Error typing char '{char}': {e}")
     
     def toggle_enabled(self):
         """Bật/tắt ứng dụng"""
         self.is_enabled = not self.is_enabled
-        status = "BẬT" if self.is_enabled else "TẮT"
-        self.logger.info(f"🔘 TOGGLE: {status}")
-        print(f"\n[APP] Text Expander {status}\n")
+        status = "BẬT ✅" if self.is_enabled else "TẮT ❌"
+        
+        self.logger.info("=" * 60)
+        self.logger.info(f"🔘 TOGGLE: Text Expander is now {status}")
+        self.logger.info("=" * 60)
+        
+        print(f"\n{'='*60}")
+        print(f"Text Expander: {status}")
+        print(f"{'='*60}\n")
+        
+        # Xóa buffer khi toggle
+        self.clear_buffer("toggle")
     
     def start(self):
         """Bắt đầu lắng nghe bàn phím"""
         self.logger.info("🎧 Starting keyboard listener...")
+        print("\n" + "="*60)
+        print("Text Expander STARTED")
+        print("Press Ctrl+Alt+X to toggle ON/OFF")
+        print("="*60 + "\n")
+        
         self.listener = keyboard.Listener(
             on_press=self.on_press,
             on_release=self.on_release
@@ -280,4 +395,4 @@ class TextExpander:
         """Dừng lắng nghe"""
         if hasattr(self, 'listener'):
             self.listener.stop()
-            self.logger.info("Keyboard listener stopped")
+            self.logger.info("🛑 Keyboard listener stopped")
